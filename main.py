@@ -1,5 +1,5 @@
 """
-main.py — FastAPI server điều phối CafeF news crawler.
+main.py — FastAPI server điều phối CafeF news crawler + FinDec model inference.
 
 Chạy local:
     uvicorn main:app --reload --port 8000
@@ -9,6 +9,7 @@ Biến môi trường:
                        Mặc định: http://localhost:5173,http://127.0.0.1:5173
     PORT             — cổng server (mặc định 8000)
     DATA_DIR         — thư mục lưu CSV/JSONL (mặc định ./data/raw)
+    SKIP_INFERENCE   — set "1" để bỏ qua bước inference (dev/test nhanh)
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ from cafef_news_crawler import (
 )
 from pathlib import Path
 
+# Import model inference (lazy-loaded singleton)
+from model_inference import get_inference
+
+SKIP_INFERENCE = os.getenv("SKIP_INFERENCE", "0") == "1"
+
 # ─────────────────────────────────────────────
 # Config từ biến môi trường
 # ─────────────────────────────────────────────
@@ -51,10 +57,26 @@ DATA_DIR = os.getenv("DATA_DIR", str(Path(__file__).parent / "data" / "raw"))
 # ─────────────────────────────────────────────
 
 app = FastAPI(
-    title="CafeF Crawler API",
-    description="API điều khiển crawler tin tức CafeF từ frontend.",
-    version="1.0.0",
+    title="CafeF Crawler + FinDec Inference API",
+    description="API điều khiển crawler CafeF và pipeline phân tích sự kiện tài chính.",
+    version="2.0.0",
 )
+
+
+@app.on_event("startup")
+async def _preload_models() -> None:
+    """Preload FinDec models khi server khởi động (chạy trong thread riêng)."""
+    if SKIP_INFERENCE:
+        print("[Startup] SKIP_INFERENCE=1 → bỏ qua preload models.")
+        return
+
+    def _load() -> None:
+        try:
+            get_inference().load_models()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Startup] Model preload FAILED: {exc}")
+
+    threading.Thread(target=_load, daemon=True, name="model-preload").start()
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,7 +119,7 @@ class ProgressInfo(BaseModel):
 
 class CrawlStatusResponse(BaseModel):
     job_id: str
-    status: str           # pending | running | done | error
+    status: str           # pending | running | analyzing | done | error
     progress: ProgressInfo
     articles_count: int
     error: Optional[str]
@@ -121,10 +143,35 @@ class ArticleOut(BaseModel):
     crawl_error: str
 
 
+class EventContextOut(BaseModel):
+    who: Optional[str] = None
+    what: Optional[str] = None
+    when: Optional[str] = None
+    where: Optional[str] = None
+    why: Optional[str] = None
+    how: Optional[str] = None
+    tense: Optional[str] = None
+    result: Optional[str] = None
+
+
+class FinancialEventOut(BaseModel):
+    id: str
+    main_topic: str
+    event_type: str
+    title: str
+    entities_involved: list[str]
+    context: dict
+    attributes: dict
+    evidence_text: str
+    confidence: float
+
+
 class CrawlResultResponse(BaseModel):
     job_id: str
     articles: list[ArticleOut]
+    events: list[FinancialEventOut]
     total: int
+    events_total: int
 
 
 # ─────────────────────────────────────────────
@@ -138,6 +185,7 @@ def _article_to_dict(article: NewsArticle) -> dict:
         "category": article.category,
         "title": article.title,
         "summary": article.summary,
+        "content": article.content,          # cần cho inference pipeline
         "url": article.url,
         "published_date": article.published_date,
         "usable_from_date": article.usable_from_date,
@@ -150,7 +198,7 @@ def _article_to_dict(article: NewsArticle) -> dict:
 
 
 def _run_crawl_job(job_id: str, config: CrawlConfig) -> None:
-    """Chạy crawl trong background thread; cập nhật _jobs liên tục."""
+    """Chạy crawl + inference trong background thread; cập nhật _jobs liên tục."""
 
     # Build args từ argparse parser (tái dụng toàn bộ logic CLI)
     argv: list[str] = ["--source", config.source]
@@ -174,9 +222,7 @@ def _run_crawl_job(job_id: str, config: CrawlConfig) -> None:
         _jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
 
     try:
-        # Monkey-patch để theo dõi tiến trình: wrap hàm crawl
-        # Thực ra crawl() trả về list sau khi xong, nên progress chỉ
-        # cập nhật được sau khi hoàn tất. Dùng threading event để update.
+        # ── Phase 1: Crawl ──────────────────────────────────────
         articles = _crawl_with_progress(job_id, args)
 
         # Ghi output files
@@ -185,11 +231,35 @@ def _run_crawl_job(job_id: str, config: CrawlConfig) -> None:
         write_csv(out_dir / "cafef_news.csv", articles, append=True)
         write_jsonl(out_dir / "cafef_news.jsonl", articles, append=True)
 
+        articles_dicts = [_article_to_dict(a) for a in articles]
+
         with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["articles"] = [_article_to_dict(a) for a in articles]
+            _jobs[job_id]["articles"] = articles_dicts
             _jobs[job_id]["progress"] = {"current": len(articles), "total": len(articles)}
             _jobs[job_id]["articles_count"] = len(articles)
+
+        # ── Phase 2: Model Inference ────────────────────────────
+        events: list[dict] = []
+        if not SKIP_INFERENCE and articles:
+            with _jobs_lock:
+                _jobs[job_id]["status"] = "analyzing"
+
+            try:
+                inference = get_inference()
+                events = inference.predict(articles_dicts)
+                # Lưu events ra JSONL
+                import json as _json
+                events_path = out_dir / "cafef_events.jsonl"
+                with events_path.open("a", encoding="utf-8") as ef:
+                    for ev in events:
+                        ef.write(_json.dumps(ev, ensure_ascii=False) + "\n")
+            except Exception as inf_exc:  # noqa: BLE001
+                print(f"[Inference] WARNING: inference failed for job {job_id}: {inf_exc}")
+                # Không crash job — trả về events rỗng
+
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["events"] = events
             _jobs[job_id]["finished_at"] = datetime.utcnow().isoformat()
 
     except Exception as exc:  # noqa: BLE001
@@ -252,6 +322,7 @@ def start_crawl(config: CrawlConfig):
             "progress": {"current": 0, "total": config.max_articles},
             "articles": [],
             "articles_count": 0,
+            "events": [],
             "error": None,
             "started_at": None,
             "finished_at": None,
@@ -297,7 +368,7 @@ def get_crawl_status(job_id: str):
 
 @app.get("/crawl/result/{job_id}", response_model=CrawlResultResponse)
 def get_crawl_result(job_id: str):
-    """Lấy danh sách articles sau khi job hoàn tất."""
+    """Lấy danh sách articles và events sau khi job hoàn tất."""
     with _jobs_lock:
         job = _jobs.get(job_id)
 
@@ -313,8 +384,13 @@ def get_crawl_result(job_id: str):
     articles_data = job.get("articles", [])
     articles = [ArticleOut(**a) for a in articles_data]
 
+    events_data = job.get("events", [])
+    events = [FinancialEventOut(**e) for e in events_data]
+
     return CrawlResultResponse(
         job_id=job_id,
         articles=articles,
+        events=events,
         total=len(articles),
+        events_total=len(events),
     )

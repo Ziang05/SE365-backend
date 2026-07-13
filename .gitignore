@@ -32,3 +32,6 @@ Thumbs.db
 .env
 .env.local
 *.local
+
+# AI Model weights (too large for GitHub)
+model/

@@ -1,90 +1,31 @@
-# CafeF Crawler Backend
+# FinDec AI - Backend (SE365-backend)
 
-FastAPI server điều phối crawler tin tức chứng khoán từ [CafeF](https://cafef.vn).
+Đây là máy chủ xử lý AI (Backend) cho hệ thống Trích xuất sự kiện tài chính từ tin tức CafeF. Nó phụ trách việc cào dữ liệu (crawl) và chạy mô hình AI (PhoBERT, BARTpho) để phân tích bài báo.
 
-## Yêu cầu
+## 🛠 Yêu cầu hệ thống
+- **Python** 3.10 trở lên.
+- Nên có **GPU NVIDIA** (VD: RTX 3060, 4060...) để chạy AI nhanh hơn (tốn khoảng 15s/bài thay vì 5 phút/bài trên CPU).
 
-- Python ≥ 3.10
-- pip
+## 🚀 Hướng dẫn cài đặt & chạy nhanh (Local)
 
-## Cài đặt
+### Bước 1: Cài đặt thư viện
+Mở terminal (PowerShell/CMD) tại thư mục `SE365-backend` và chạy lệnh sau:
 
 ```bash
-# Clone repo
-git clone <repo-url>
-cd SE365-backend
-
-# Tạo virtual environment (khuyến nghị)
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-# hoặc: source .venv/bin/activate  (Linux/Mac)
-
-# Cài dependencies
 pip install -r requirements.txt
 ```
 
-## Cấu hình
+*(Lưu ý: Nếu máy bạn có GPU NVIDIA, hãy cài thêm PyTorch hỗ trợ CUDA để chạy cực nhanh bằng lệnh: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124`)*
 
-Copy file `.env.example` thành `.env` rồi chỉnh sửa:
-
-```bash
-copy .env.example .env
-```
-
-| Biến | Mô tả | Mặc định |
-|------|--------|----------|
-| `ALLOWED_ORIGINS` | CORS origins (phân cách bằng `,`) | `http://localhost:5173` |
-| `DATA_DIR` | Thư mục lưu file CSV/JSONL output | `./data/raw` |
-| `PORT` | Cổng server | `8000` |
-
-## Chạy
+### Bước 2: Chạy Server
+Tiếp tục chạy lệnh sau để khởi động backend:
 
 ```bash
-uvicorn main:app --reload --port 8000
+python -m uvicorn main:app --port 8000
 ```
+- Khi terminal hiện dòng `[FinDec] All 4 models ready on cuda` (hoặc cpu), nghĩa là AI đã tải xong và sẵn sàng nhận yêu cầu từ web.
+- Server sẽ chạy tại địa chỉ: `http://localhost:8000`.
 
-Server sẽ chạy tại `http://localhost:8000`.
-
-Tài liệu API tự động: `http://localhost:8000/docs`
-
-## API Endpoints
-
-| Method | Path | Mô tả |
-|--------|------|--------|
-| `GET` | `/health` | Health check |
-| `POST` | `/crawl` | Bắt đầu crawl job mới |
-| `GET` | `/crawl/status/{job_id}` | Poll trạng thái job |
-| `GET` | `/crawl/result/{job_id}` | Lấy kết quả sau khi done |
-
-### Ví dụ: Bắt đầu crawl
-
-```bash
-curl -X POST http://localhost:8000/crawl \
-  -H "Content-Type: application/json" \
-  -d '{"source": "category", "max_articles": 20, "include_content": true}'
-```
-
-### Ví dụ: Kiểm tra trạng thái
-
-```bash
-curl http://localhost:8000/crawl/status/<job_id>
-```
-
-## Output
-
-Sau khi crawl xong, dữ liệu được lưu tại `data/raw/`:
-- `cafef_news.csv` — dữ liệu dạng bảng
-- `cafef_news.jsonl` — mỗi dòng là 1 JSON object
-
-## Cấu trúc project
-
-```
-SE365-backend/
-├── main.py                  # FastAPI server
-├── cafef_news_crawler.py    # Logic crawler CafeF
-├── requirements.txt         # Python dependencies
-├── .env.example             # Template biến môi trường
-├── .gitignore
-└── data/
-    └── raw/                 # Output CSV/JSONL (tự tạo khi crawl)
-```
+---
+**💡 Mẹo nhỏ về file `.env`:**
+Project đã được cấu hình sẵn để chạy ngay trên máy cá nhân của bạn. Bạn **KHÔNG CẦN** phải tạo file `.env` (từ file `.env.example`). Hệ thống sẽ tự động dùng các giá trị mặc định chuẩn xác nhất cho localhost. Bạn chỉ cần quan tâm đến file `.env` khi nào muốn đưa project lên server thật (production).
