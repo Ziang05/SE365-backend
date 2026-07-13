@@ -17,7 +17,12 @@ pip install -r requirements.txt
 
 *(Lưu ý: Nếu máy bạn có GPU NVIDIA, hãy cài thêm PyTorch hỗ trợ CUDA để chạy cực nhanh bằng lệnh: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124`)*
 
-### Bước 2: Chạy Server
+### Bước 2: Tải Mô hình AI
+Vì mô hình AI rất nặng nên không được đẩy lên GitHub. Bạn cần tải thư mục `model` riêng.
+- Tải về và giải nén.
+- Tạo thư mục `model` bên trong thư mục `SE365-backend` và copy thư mục 'findec_models' vào trong 'model' (đường dẫn đúng sẽ là: `SE365-backend/model/findec_models/...`).
+
+### Bước 3: Chạy Server
 Tiếp tục chạy lệnh sau để khởi động backend:
 
 ```bash
